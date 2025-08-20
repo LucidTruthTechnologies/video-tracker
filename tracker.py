@@ -1,0 +1,796 @@
+#!/usr/bin/env python3
+"""
+Motion-First Bidirectional Tracker (4K Source, Person Anywhere)
+Main pipeline implementation with zone-aware tracking and RTS smoothing.
+"""
+
+import argparse
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+import numpy as np
+import cv2
+from dataclasses import dataclass, field
+import hashlib
+import subprocess
+import platform
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Config:
+    """Configuration container with validation."""
+    io: Dict[str, Any]
+    zones_file: str
+    zone_params: Dict[str, Dict[str, Any]]
+    flow: Dict[str, Any]
+    tracker: Dict[str, Any]
+    detector: Dict[str, Any]
+    render: Dict[str, Any]
+    qc: Dict[str, Any]
+    zone_editor: Dict[str, Any]
+    outputs: Dict[str, str]
+    
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if not self.io.get('work_height') or self.io['work_height'] <= 0:
+            raise ValueError("work_height must be positive")
+        if self.tracker.get('dt') is not None and self.tracker['dt'] <= 0:
+            raise ValueError("dt must be positive or null")
+
+
+@dataclass
+class Zone:
+    """Zone representation with polygons and parameters."""
+    name: str
+    polygons: List[List[Tuple[float, float]]]
+    params: Dict[str, Any]
+    
+    def contains_point(self, x: float, y: float) -> bool:
+        """Check if point is inside any polygon of this zone."""
+        for polygon in self.polygons:
+            if self._point_in_polygon(x, y, polygon):
+                return True
+        return False
+    
+    def _point_in_polygon(self, x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
+        """Point-in-polygon test using ray casting."""
+        if len(polygon) < 3:
+            return False
+        
+        inside = False
+        j = len(polygon) - 1
+        for i in range(len(polygon)):
+            if ((polygon[i][1] > y) != (polygon[j][1] > y) and
+                x < (polygon[j][0] - polygon[i][0]) * (y - polygon[i][1]) / 
+                    (polygon[j][1] - polygon[i][1]) + polygon[i][0]):
+                inside = not inside
+            j = i
+        return inside
+
+
+@dataclass
+class TrackingState:
+    """Kalman filter state and metadata."""
+    frame_idx: int
+    time_s: float
+    cx: float  # center x (source coordinates)
+    cy: float  # center y (source coordinates)
+    w: float   # width (source coordinates)
+    h: float   # height (source coordinates)
+    vx: float  # velocity x
+    vy: float  # velocity y
+    vw: float  # velocity width
+    vh: float  # velocity height
+    confidence: float
+    zone: str
+    flags: List[str] = field(default_factory=list)
+    maha_sq: Optional[float] = None
+    flow_agree: Optional[float] = None
+    iou_meas_pred: Optional[float] = None
+
+
+@dataclass
+class Seed:
+    """Seed information for tracking initialization."""
+    frame_idx: int
+    box: Tuple[float, float, float, float]  # x1, y1, x2, y2 in source coordinates
+    time_s: float
+    
+    def validate(self, source_width: int, source_height: int) -> bool:
+        """Validate seed bounds."""
+        x1, y1, x2, y2 = self.box
+        return (0 <= x1 < x2 < source_width and 
+                0 <= y1 < y2 < source_height)
+
+
+class ConfigLoader:
+    """Configuration loader with multi-file override support."""
+    
+    @staticmethod
+    def load_config(config_paths: List[str]) -> Config:
+        """Load and merge multiple configuration files."""
+        if not config_paths:
+            raise ValueError("At least one config file must be provided")
+        
+        # Load base config
+        base_config = ConfigLoader._load_yaml(config_paths[0])
+        
+        # Apply overrides
+        for override_path in config_paths[1:]:
+            override_config = ConfigLoader._load_yaml(override_path)
+            ConfigLoader._merge_configs(base_config, override_config)
+        
+        # Expand environment variables in output paths
+        ConfigLoader._expand_output_paths(base_config)
+        
+        return Config(**base_config)
+    
+    @staticmethod
+    def _load_yaml(file_path: str) -> Dict[str, Any]:
+        """Load YAML file."""
+        try:
+            import yaml
+            with open(file_path, 'r') as f:
+                return yaml.safe_load(f)
+        except ImportError:
+            logger.error("PyYAML not installed. Install with: pip install PyYAML")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"Failed to load config file {file_path}: {e}")
+            sys.exit(1)
+    
+    @staticmethod
+    def _merge_configs(base: Dict[str, Any], override: Dict[str, Any]):
+        """Recursively merge override config into base config."""
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                ConfigLoader._merge_configs(base[key], value)
+            else:
+                base[key] = value
+    
+    @staticmethod
+    def _expand_output_paths(config: Dict[str, Any]):
+        """Expand environment variables in output paths."""
+        for key, value in config.get('outputs', {}).items():
+            if isinstance(value, str):
+                config['outputs'][key] = os.path.expandvars(value)
+
+
+class VideoProbe:
+    """Video metadata probing and validation."""
+    
+    def __init__(self, video_path: str):
+        self.video_path = video_path
+        self.metadata = {}
+        
+    def probe(self) -> Dict[str, Any]:
+        """Probe video file and return metadata."""
+        try:
+            # Use ffprobe to get video information
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_format', '-show_streams', self.video_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout)
+            
+            # Extract video stream info
+            video_stream = None
+            for stream in data['streams']:
+                if stream['codec_type'] == 'video':
+                    video_stream = stream
+                    break
+            
+            if not video_stream:
+                raise ValueError("No video stream found")
+            
+            # Extract metadata
+            self.metadata = {
+                'width': int(video_stream['width']),
+                'height': int(video_stream['height']),
+                'fps': self._parse_fps(video_stream.get('r_frame_rate', '0/1')),
+                'frame_count': int(video_stream.get('nb_frames', 0)),
+                'duration': float(data['format'].get('duration', 0)),
+                'codec': video_stream.get('codec_name', 'unknown'),
+                'pixel_format': video_stream.get('pix_fmt', 'unknown'),
+                'bitrate': int(data['format'].get('bit_rate', 0))
+            }
+            
+            # Detect GPU decode capability
+            self.metadata['gpu_decode'] = self._detect_gpu_decode()
+            
+            logger.info(f"Video probed: {self.metadata['width']}x{self.metadata['height']} "
+                       f"@{self.metadata['fps']:.2f}fps, {self.metadata['frame_count']} frames")
+            
+            return self.metadata
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"ffprobe failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Video probing failed: {e}")
+            raise
+    
+    def _parse_fps(self, fps_str: str) -> float:
+        """Parse FPS string (e.g., '30/1' -> 30.0)."""
+        try:
+            if '/' in fps_str:
+                num, den = map(int, fps_str.split('/'))
+                return num / den if den != 0 else 0
+            else:
+                return float(fps_str)
+        except:
+            return 0.0
+    
+    def _detect_gpu_decode(self) -> bool:
+        """Detect if GPU decode (NVDEC) is available."""
+        try:
+            # Check for NVIDIA GPU and drivers
+            result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+            if result.returncode == 0:
+                logger.info("NVIDIA GPU detected - NVDEC available")
+                return True
+        except:
+            pass
+        
+        logger.info("GPU decode not available - using CPU")
+        return False
+
+
+class FrameReader:
+    """Frame reader with work resolution downscaling."""
+    
+    def __init__(self, video_path: str, work_height: int):
+        self.video_path = video_path
+        self.work_height = work_height
+        self.cap = None
+        self.source_width = 0
+        self.source_height = 0
+        self.work_width = 0
+        self.scale_factor = 1.0
+        
+    def open(self) -> bool:
+        """Open video capture."""
+        self.cap = cv2.VideoCapture(self.video_path)
+        if not self.cap.isOpened():
+            return False
+        
+        self.source_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.source_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Calculate work resolution
+        self.scale_factor = self.work_height / self.source_height
+        self.work_width = int(self.source_width * self.scale_factor)
+        
+        logger.info(f"Frame reader: {self.source_width}x{self.source_height} -> {self.work_width}x{self.work_height}")
+        return True
+    
+    def seek_frame(self, frame_idx: int) -> bool:
+        """Seek to specific frame."""
+        if self.cap is None:
+            return False
+        return self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    
+    def read_frame(self) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray]]:
+        """Read next frame, returns (success, source_frame, work_frame)."""
+        if self.cap is None:
+            return False, None, None
+        
+        ret, frame = self.cap.read()
+        if not ret:
+            return False, None, None
+        
+        # Downscale to work resolution
+        work_frame = cv2.resize(frame, (self.work_width, self.work_height))
+        
+        return True, frame, work_frame
+    
+    def close(self):
+        """Close video capture."""
+        if self.cap:
+            self.cap.release()
+
+
+class ZoneManager:
+    """Zone management and mask generation."""
+    
+    def __init__(self, config: Config, source_width: int, source_height: int):
+        self.config = config
+        self.source_width = source_width
+        self.source_height = source_height
+        self.zones: Dict[str, Zone] = {}
+        self.source_masks: Dict[str, np.ndarray] = {}
+        self.work_masks: Dict[str, np.ndarray] = {}
+        
+    def load_zones(self, zones_file: str) -> bool:
+        """Load zones from JSON file."""
+        if not zones_file or not os.path.exists(zones_file):
+            logger.warning(f"Zones file not found: {zones_file}")
+            return False
+        
+        try:
+            with open(zones_file, 'r') as f:
+                zones_data = json.load(f)
+            
+            # Validate schema
+            if not self._validate_zones_schema(zones_data):
+                return False
+            
+            # Load zones
+            self.zones = {}
+            for zone_data in zones_data['zones']:
+                zone_name = zone_data['name']
+                polygons = zone_data['polygons']
+                
+                # Get zone parameters (with defaults)
+                zone_params = self.config.zone_params.get(zone_name, {})
+                
+                zone = Zone(name=zone_name, polygons=polygons, params=zone_params)
+                self.zones[zone_name] = zone
+            
+            logger.info(f"Loaded {len(self.zones)} zones from {zones_file}")
+            
+            # Generate masks
+            self._generate_masks()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load zones: {e}")
+            return False
+    
+    def _validate_zones_schema(self, zones_data: Dict[str, Any]) -> bool:
+        """Validate zones JSON schema."""
+        required_fields = ['version', 'source_width', 'source_height', 'zones']
+        for field in required_fields:
+            if field not in zones_data:
+                logger.error(f"Missing required field: {field}")
+                return False
+        
+        # Check dimensions match
+        if (zones_data['source_width'] != self.source_width or 
+            zones_data['source_height'] != self.source_height):
+            logger.error("Zone dimensions don't match video dimensions")
+            return False
+        
+        # Validate zone polygons
+        for zone in zones_data['zones']:
+            if 'name' not in zone or 'polygons' not in zone:
+                logger.error("Invalid zone structure")
+                return False
+            
+            for polygon in zone['polygons']:
+                if len(polygon) < 3:
+                    logger.error(f"Polygon in zone {zone['name']} has <3 vertices")
+                    return False
+                
+                for point in polygon:
+                    if len(point) != 2:
+                        logger.error(f"Invalid point in zone {zone['name']}")
+                        return False
+                    
+                    x, y = point
+                    if not (0 <= x < self.source_width and 0 <= y < self.source_height):
+                        logger.error(f"Point {point} outside bounds in zone {zone['name']}")
+                        return False
+        
+        return True
+    
+    def _generate_masks(self):
+        """Generate binary masks for each zone in source and work resolutions."""
+        work_height = self.config.io['work_height']
+        work_width = int(self.source_width * work_height / self.source_height)
+        
+        for zone_name, zone in self.zones.items():
+            # Source resolution mask
+            source_mask = np.zeros((self.source_height, self.source_width), dtype=np.uint8)
+            for polygon in zone.polygons:
+                polygon_array = np.array(polygon, dtype=np.int32)
+                cv2.fillPoly(source_mask, [polygon_array], 255)
+            self.source_masks[zone_name] = source_mask
+            
+            # Work resolution mask
+            work_mask = np.zeros((work_height, work_width), dtype=np.uint8)
+            for polygon in zone.polygons:
+                # Scale polygon to work resolution
+                work_polygon = []
+                for x, y in polygon:
+                    work_x = int(x * work_width / self.source_width)
+                    work_y = int(y * work_height / self.source_height)
+                    work_polygon.append([work_x, work_y])
+                
+                polygon_array = np.array(work_polygon, dtype=np.int32)
+                cv2.fillPoly(work_mask, [polygon_array], 255)
+            
+            self.work_masks[zone_name] = work_mask
+    
+    def get_active_zone(self, box: Tuple[float, float, float, float], 
+                        work_res: bool = False) -> Tuple[str, float]:
+        """Determine active zone for a bounding box with overlap fraction."""
+        x1, y1, x2, y2 = box
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+        
+        best_zone = "unknown"
+        best_overlap = 0.0
+        
+        masks = self.work_masks if work_res else self.source_masks
+        
+        for zone_name, mask in masks.items():
+            # Calculate overlap fraction
+            box_mask = np.zeros_like(mask)
+            x1_int, y1_int = int(x1), int(y1)
+            x2_int, y2_int = int(x2), int(y2)
+            
+            # Ensure bounds
+            x1_int = max(0, min(x1_int, mask.shape[1] - 1))
+            y1_int = max(0, min(y1_int, mask.shape[0] - 1))
+            x2_int = max(0, min(x2_int, mask.shape[1] - 1))
+            y2_int = max(0, min(y2_int, mask.shape[0] - 1))
+            
+            if x2_int > x1_int and y2_int > y1_int:
+                box_mask[y1_int:y2_int, x1_int:x2_int] = 255
+                overlap = np.sum((mask > 0) & (box_mask > 0)) / np.sum(box_mask > 0)
+                
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_zone = zone_name
+        
+        return best_zone, best_overlap
+
+
+class OpticalFlow:
+    """Optical flow computation with zone-aware sampling."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.engine = config.get('engine', 'farneback')
+        self.dilate_box_px = config.get('dilate_box_px_work', 12)
+        self.tukey_c = config.get('tukey_c', 4.5)
+        
+    def compute_flow(self, frame1: np.ndarray, frame2: np.ndarray) -> np.ndarray:
+        """Compute optical flow between two frames."""
+        if self.engine == 'farneback':
+            return self._compute_farneback_flow(frame1, frame2)
+        elif self.engine == 'raft':
+            return self._compute_raft_flow(frame1, frame2)
+        else:
+            logger.warning(f"Unknown flow engine: {self.engine}, falling back to Farneback")
+            return self._compute_farneback_flow(frame1, frame2)
+    
+    def _compute_farneback_flow(self, frame1: np.ndarray, frame2: np.ndarray) -> np.ndarray:
+        """Compute Farneback optical flow."""
+        # Convert to grayscale
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        
+        # Compute flow
+        flow = cv2.calcOpticalFlowFarneback(
+            gray1, gray2, None, 
+            pyr_scale=0.5, levels=3, winsize=15, 
+            iterations=3, poly_n=5, poly_sigma=1.2, 
+            flags=0
+        )
+        
+        return flow
+    
+    def _compute_raft_flow(self, frame1: np.ndarray, frame2: np.ndarray) -> np.ndarray:
+        """Compute RAFT optical flow (GPU-accelerated)."""
+        # TODO: Implement RAFT flow computation
+        logger.warning("RAFT flow not yet implemented, falling back to Farneback")
+        return self._compute_farneback_flow(frame1, frame2)
+    
+    def sample_flow_in_box(self, flow: np.ndarray, box: Tuple[float, float, float, float]) -> Dict[str, Any]:
+        """Sample flow within a dilated bounding box using Tukey biweight."""
+        x1, y1, x2, y2 = map(int, box)
+        
+        # Dilate box
+        x1_d = max(0, x1 - self.dilate_box_px)
+        y1_d = max(0, y1 - self.dilate_box_px)
+        x2_d = min(flow.shape[1], x2 + self.dilate_box_px)
+        y2_d = min(flow.shape[0], y2 + self.dilate_box_px)
+        
+        # Extract flow in dilated region
+        flow_region = flow[y1_d:y2_d, x1_d:x2_d]
+        
+        if flow_region.size == 0:
+            return {'center_shift': (0, 0), 'rim_divergence': 0, 'flow_agree': 0}
+        
+        # Compute center shift (mean flow)
+        center_shift = np.mean(flow_region, axis=(0, 1))
+        
+        # Compute rim divergence (flow variance)
+        rim_divergence = np.std(flow_region, axis=(0, 1))
+        
+        # Compute flow agreement (coherence)
+        flow_magnitudes = np.linalg.norm(flow_region, axis=2)
+        flow_angles = np.arctan2(flow_region[:, :, 1], flow_region[:, :, 0])
+        
+        # Calculate agreement ratio
+        mean_angle = np.mean(flow_angles)
+        angle_diff = np.abs(flow_angles - mean_angle)
+        agreement_ratio = np.sum(angle_diff < np.pi/4) / angle_diff.size
+        
+        return {
+            'center_shift': center_shift,
+            'rim_divergence': rim_divergence,
+            'flow_agree': agreement_ratio
+        }
+
+
+class KalmanTracker:
+    """Kalman filter tracker with zone-aware constraints."""
+    
+    def __init__(self, config: Dict[str, Any], fps: float):
+        self.config = config
+        self.dt = 1.0 / fps if fps > 0 else 0.033  # Default to 30fps
+        
+        # State: [cx, cy, w, h, vx, vy, vw, vh]
+        self.state_dim = 8
+        self.measurement_dim = 4  # [cx, cy, w, h]
+        
+        # Initialize Kalman filter
+        self.kf = cv2.KalmanFilter(self.state_dim, self.measurement_dim)
+        self._setup_kalman_filter()
+        
+        # Zone-aware parameters
+        self.zone_params = config.get('zone_params', {})
+        
+    def _setup_kalman_filter(self):
+        """Setup Kalman filter matrices."""
+        # State transition matrix (constant velocity model)
+        self.kf.transitionMatrix = np.eye(self.state_dim, dtype=np.float32)
+        self.kf.transitionMatrix[:4, 4:] = np.eye(4, dtype=np.float32) * self.dt
+        
+        # Measurement matrix
+        self.kf.measurementMatrix = np.zeros((self.measurement_dim, self.state_dim), dtype=np.float32)
+        self.kf.measurementMatrix[:4, :4] = np.eye(4, dtype=np.float32)
+        
+        # Process noise covariance
+        process_noise = np.eye(self.state_dim, dtype=np.float32)
+        process_noise[4:, 4:] *= 100  # Higher noise for velocities
+        self.kf.processNoiseCov = process_noise * 0.1
+        
+        # Measurement noise covariance
+        measurement_noise = np.eye(self.measurement_dim, dtype=np.float32)
+        self.kf.measurementNoiseCov = measurement_noise * 10
+        
+        # Initial state covariance
+        self.kf.errorCovPost = np.eye(self.state_dim, dtype=np.float32) * 100
+        
+    def predict(self) -> np.ndarray:
+        """Predict next state."""
+        prediction = self.kf.predict()
+        return prediction.flatten()
+    
+    def update(self, measurement: np.ndarray, zone_name: str = "unknown") -> np.ndarray:
+        """Update state with measurement."""
+        # Adjust process noise based on zone
+        if zone_name in self.zone_params:
+            zone_scale = self.zone_params[zone_name].get('process_noise_scale', 1.0)
+            self.kf.processNoiseCov *= zone_scale
+        
+        # Update with measurement
+        self.kf.correct(measurement.astype(np.float32))
+        return self.kf.statePost.flatten()
+    
+    def get_state(self) -> np.ndarray:
+        """Get current state."""
+        return self.kf.statePost.flatten()
+    
+    def set_state(self, state: np.ndarray):
+        """Set current state."""
+        self.kf.statePost = state.reshape(-1, 1).astype(np.float32)
+
+
+class Tracker:
+    """Main tracking pipeline."""
+    
+    def __init__(self, config: Config, video_path: str):
+        self.config = config
+        self.video_path = video_path
+        self.video_probe = VideoProbe(video_path)
+        self.frame_reader = None
+        self.zone_manager = None
+        self.optical_flow = None
+        self.kalman_tracker = None
+        self.seed = None
+        
+    def initialize(self) -> bool:
+        """Initialize tracking components."""
+        try:
+            # Probe video
+            metadata = self.video_probe.probe()
+            
+            # Initialize frame reader
+            self.frame_reader = FrameReader(self.video_path, self.config.io['work_height'])
+            if not self.frame_reader.open():
+                raise RuntimeError("Failed to open video file")
+            
+            # Initialize zone manager
+            self.zone_manager = ZoneManager(self.config, metadata['width'], metadata['height'])
+            if self.config.zones_file:
+                self.zone_manager.load_zones(self.config.zones_file)
+            
+            # Initialize optical flow
+            self.optical_flow = OpticalFlow(self.config.flow)
+            
+            # Initialize Kalman tracker
+            self.kalman_tracker = KalmanTracker(self.config.tracker, metadata['fps'])
+            
+            logger.info("Tracker initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize tracker: {e}")
+            return False
+    
+    def set_seed(self, frame_idx: int, box: Tuple[float, float, float, float]) -> bool:
+        """Set tracking seed."""
+        if self.video_probe.metadata:
+            time_s = frame_idx / self.video_probe.metadata['fps']
+            self.seed = Seed(frame_idx=frame_idx, box=box, time_s=time_s)
+            
+            # Validate seed
+            if not self.seed.validate(self.video_probe.metadata['width'], 
+                                    self.video_probe.metadata['height']):
+                logger.error("Invalid seed bounds")
+                return False
+            
+            logger.info(f"Seed set: frame {frame_idx}, box {box}")
+            return True
+        return False
+    
+    def run_tracking(self, run_dir: Path) -> bool:
+        """Run the complete tracking pipeline."""
+        if not self.seed:
+            logger.error("No seed set")
+            return False
+        
+        try:
+            # Create output files
+            track_csv = run_dir / "track.csv"
+            track_jsonl = run_dir / "track.jsonl"
+            audit_json = run_dir / "audit.json"
+            
+            # Initialize tracking
+            self.frame_reader.seek_frame(self.seed.frame_idx)
+            
+            # TODO: Implement forward and backward tracking passes
+            logger.info("TODO: Implement tracking passes")
+            
+            # Save audit log
+            self._save_audit_log(audit_json)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Tracking failed: {e}")
+            return False
+    
+    def _save_audit_log(self, audit_file: Path):
+        """Save audit log with system information."""
+        audit_data = {
+            "input_hash": self._compute_file_hash(self.video_path),
+            "config_snapshot": self.config.__dict__,
+            "software_versions": self._get_software_versions(),
+            "gpu_info": self._get_gpu_info(),
+            "seed_details": {
+                "frame_idx": self.seed.frame_idx,
+                "box": self.seed.box,
+                "time_s": self.seed.time_s
+            } if self.seed else None,
+            "processing_metadata": {
+                "timestamp": time.time(),
+                "platform": platform.platform(),
+                "python_version": platform.python_version()
+            }
+        }
+        
+        with open(audit_file, 'w') as f:
+            json.dump(audit_data, f, indent=2)
+    
+    def _compute_file_hash(self, file_path: str) -> str:
+        """Compute SHA-256 hash of file."""
+        try:
+            with open(file_path, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except:
+            return "unknown"
+    
+    def _get_software_versions(self) -> Dict[str, str]:
+        """Get software version information."""
+        versions = {
+            "opencv": cv2.__version__,
+            "numpy": np.__version__,
+            "python": platform.python_version()
+        }
+        return versions
+    
+    def _get_gpu_info(self) -> Dict[str, Any]:
+        """Get GPU information."""
+        gpu_info = {"available": False}
+        
+        try:
+            result = subprocess.run(['nvidia-smi', '--query-gpu=name,driver_version', 
+                                   '--format=csv,noheader,nounits'], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                gpu_info["available"] = True
+                gpu_info["nvidia_info"] = result.stdout.strip()
+        except:
+            pass
+        
+        return gpu_info
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description="Motion-First Bidirectional Tracker")
+    parser.add_argument('command', choices=['full-run'], help='Tracking command')
+    parser.add_argument('--config', nargs='+', default=['config.yaml'], 
+                       help='Configuration files (base + overrides)')
+    parser.add_argument('--video', required=True, help='Input video file')
+    parser.add_argument('--seed-frame', type=int, help='Seed frame index')
+    parser.add_argument('--seed-box', help='Seed bounding box (x1,y1,x2,y2)')
+    parser.add_argument('--run-dir', help='Output directory for this run')
+    
+    args = parser.parse_args()
+    
+    try:
+        # Load configuration
+        config = ConfigLoader.load_config(args.config)
+        logger.info("Configuration loaded successfully")
+        
+        # Create run directory
+        if args.run_dir:
+            run_dir = Path(args.run_dir)
+        else:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            run_dir = Path(f"runs/{timestamp}")
+        
+        run_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Run directory: {run_dir}")
+        
+        # Initialize tracker
+        tracker = Tracker(config, args.video)
+        if not tracker.initialize():
+            sys.exit(1)
+        
+        # Set seed if provided
+        if args.seed_frame is not None and args.seed_box:
+            try:
+                seed_box = tuple(map(float, args.seed_box.split(',')))
+                if len(seed_box) != 4:
+                    raise ValueError("Seed box must have 4 values: x1,y1,x2,y2")
+                
+                if not tracker.set_seed(args.seed_frame, seed_box):
+                    sys.exit(1)
+            except ValueError as e:
+                logger.error(f"Invalid seed box format: {e}")
+                sys.exit(1)
+        else:
+            logger.error("Both --seed-frame and --seed-box are required")
+            sys.exit(1)
+        
+        # Run tracking
+        if not tracker.run_tracking(run_dir):
+            sys.exit(1)
+        
+        logger.info("Tracking completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Tracker failed: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

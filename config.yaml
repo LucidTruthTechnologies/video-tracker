@@ -1,0 +1,119 @@
+# config.yaml — baseline with zones and zone editor settings
+
+io:
+  constant_fps: true
+  target_fps: null           # keep source FPS
+  work_height: 1080
+  decode_threads: 4
+
+# Zones are loaded from an external JSON created by the zone editor.
+zones_file: "zones.json"     # leave empty to treat entire frame as a single zone "global"
+
+# Per-zone motion/occlusion parameters (defaults; can be overridden per zone name)
+zone_params:
+  water:
+    speed_px_s_max: 2400
+    accel_px_s2_max: 10000
+    scale_change_per_frame_max: 0.10
+    missing_frames_max: 120
+    process_noise_scale: 1.5
+    flow:
+      min_agreement_ratio: 0.70
+      max_angle_deg: 45
+  deck:
+    speed_px_s_max: 1200
+    accel_px_s2_max: 5000
+    scale_change_per_frame_max: 0.06
+    missing_frames_max: 180
+    process_noise_scale: 1.0
+    flow:
+      min_agreement_ratio: 0.65
+      max_angle_deg: 40
+  bleachers:
+    speed_px_s_max: 400
+    accel_px_s2_max: 1500
+    scale_change_per_frame_max: 0.04
+    missing_frames_max: 600
+    process_noise_scale: 0.7
+    flow:
+      min_agreement_ratio: 0.60
+      max_angle_deg: 35
+  walkway:
+    speed_px_s_max: 1400
+    accel_px_s2_max: 6000
+    scale_change_per_frame_max: 0.07
+    missing_frames_max: 180
+    process_noise_scale: 1.0
+    flow:
+      min_agreement_ratio: 0.65
+      max_angle_deg: 40
+
+flow:
+  engine: farneback            # or raft (GPU)
+  fp16: true
+  batch_size: 2
+  forward: true
+  backward: true
+  dilate_box_px_work: 12
+  tukey_c: 4.5
+
+tracker:
+  dt: null                     # derived from FPS
+  measurement_noise:
+    center_px_work: 2.5
+    size_px_work: 3.5
+  gates:
+    iou_min: 0.2
+    maha_max_sq: 9.0
+  smoothing:
+    rts: true
+    ema_center_alpha: 0.3
+    ema_size_alpha: 0.2
+  stationary:
+    enable: true
+    coherence_threshold: 0.35
+    velocity_epsilon_px_s: 5
+  confidence:
+    maha_weight: 0.5
+    flow_agree_weight: 0.3
+    iou_weight: 0.2
+    pred_decay_gamma: 0.95
+
+detector:
+  enable: false
+  iou_min: 0.2
+  maha_max_sq: 9.0
+  reanchor_interval_frames: 15
+  max_correction_px: 10
+
+render:
+  draw_thickness: 4
+  font_scale: 0.7
+  label: "TARGET"
+  show_zone: true
+  show_confidence: true
+
+qc:
+  export_low_conf_clips: true
+  low_conf_threshold: 0.35
+  window_sec: 3
+  bottom_k: 5
+
+# Zone Editor defaults (UI behavior)
+zone_editor:
+  overlay_alpha: 0.35         # 0..1 fill transparency of polygons
+  vertex_radius_px: 6
+  snap_px: 8                  # screen-pixel snap distance for grabbing vertices
+  show_help_on_start: true
+  autosave_interval_s: 60
+  color_palette:              # optional, cycles per zone; RGBA 0..255
+    - [0, 160, 255, 128]      # water
+    - [0, 200, 120, 128]      # deck
+    - [240, 180, 0, 128]      # bleachers
+    - [200, 0, 200, 128]      # walkway
+
+outputs:
+  traj_csv: "${RUN_DIR}/track.csv"
+  traj_jsonl: "${RUN_DIR}/track.jsonl"
+  annotated_video: "${RUN_DIR}/annotated_4k.mp4"
+  audit_log: "${RUN_DIR}/audit.json"
