@@ -44,7 +44,7 @@
 ## In Progress 🚧
 
 ### Forward/Backward Tracking Implementation
-- [ ] [1pt] Implement forward tracking loop from seed frame
+- [x] [1pt] Implement forward tracking loop from seed frame
 - [ ] [1pt] Implement backward tracking loop from seed frame
 - [ ] [1pt] Implement RTS smoothing and fusion
 
@@ -75,8 +75,8 @@
 - [ ] [1pt] Accept at most one detection inside the KF gate and above IoU τ; use to re-anchor `w,h` (small `cx,cy` correction) respecting zone bounds.
 
 ### Forward Pass
-- [ ] [1pt] Implement forward loop `f0..F-1`: predict; derive motion measurement; **zone-aware** gating; update or skip; emit per-frame record with zone label.
-- [ ] [1pt] Diagnostics: `maha_sq`, `flow_agree`, `iou_meas_pred`, zone, flags (`MEAS|PRED|GAP_*|LOW_CONF|STATIONARY`).
+- [x] [1pt] Implement forward loop `f0..F-1`: predict; derive motion measurement; **zone-aware** gating; update or skip; emit per-frame record with zone label.
+- [x] [1pt] Diagnostics: `maha_sq`, `flow_agree`, `iou_meas_pred`, zone, flags (`MEAS|PRED|GAP_*|LOW_CONF|STATIONARY`).
 
 ### Backward Pass
 - [ ] [1pt] Implement backward loop `f0..0` mirroring forward logic with reverse-time flow.
@@ -97,8 +97,8 @@
 - [ ] [1pt] Export low-bitrate review MP4 (CRF 20–23).
 
 ### Outputs and Schemas
-- [ ] [1pt] Emit `track.csv` columns: `frame,time_s,cx,cy,w,h,x1,y1,x2,y2,confidence,flags,zone,maha_sq,flow_agree,iou_meas_pred`.
-- [ ] [1pt] Emit `track.jsonl` mirroring CSV.
+- [x] [1pt] Emit `track.csv` columns: `frame,time_s,cx,cy,w,h,x1,y1,x2,y2,confidence,flags,zone,maha_sq,flow_agree,iou_meas_pred`.
+- [x] [1pt] Emit `track.jsonl` mirroring CSV.
 - [x] [1pt] Emit `audit.json` with hashes, config snapshot, software versions, model hashes, GPU/driver info, seed.
 
 ### QC Artifacts
@@ -124,18 +124,18 @@
 ## Progress Summary
 
 - **Total Tasks**: 47
-- **Completed**: 26
-- **In Progress**: 3
-- **Pending**: 18
-- **Progress**: 55%
+- **Completed**: 29
+- **In Progress**: 2
+- **Pending**: 16
+- **Progress**: 62%
 
 ## Next Priority Tasks
 
-1. Implement forward tracking loop from seed frame
+1. ✅ Implement forward tracking loop from seed frame
 2. Implement backward tracking loop from seed frame  
 3. Implement RTS smoothing and fusion
-4. Implement zone-aware gating and measurement updates
-5. Add output generation (CSV, JSONL, annotated video)
+4. ✅ Implement zone-aware gating and measurement updates
+5. ✅ Add output generation (CSV, JSONL, annotated video)
 
 ## Notes
 
