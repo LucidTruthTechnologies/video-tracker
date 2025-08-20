@@ -95,6 +95,10 @@ class TrackingState:
     maha_sq: Optional[float] = None
     flow_agree: Optional[float] = None
     iou_meas_pred: Optional[float] = None
+    x1: Optional[float] = None  # bounding box x1 (source coordinates)
+    y1: Optional[float] = None  # bounding box y1 (source coordinates)
+    x2: Optional[float] = None  # bounding box x2 (source coordinates)
+    y2: Optional[float] = None  # bounding box y2 (source coordinates)
 
 
 @dataclass
@@ -874,7 +878,11 @@ class Tracker:
             confidence=confidence,
             zone=zone_name,
             flags=flags,
-            flow_agree=flow_info.get('flow_agree', 0.0)
+            flow_agree=flow_info.get('flow_agree', 0.0),
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2
         )
     
     def _save_tracking_results(self, results: List[TrackingState], 
