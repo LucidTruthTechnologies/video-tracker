@@ -909,15 +909,15 @@ class Tracker:
             flow_info = self.optical_flow.sample_flow_in_box(flow, pred_box)
             
             # Try detection-based measurement first
-            detected_center, detection_confidence = self.object_detector.detect_object_center(
+            detected_cx, detected_cy, detection_confidence = self.object_detector.detect_object_center(
                 work_frame, pred_box
             )
             
             # Create measurement from detection or fallback to flow
             if detection_confidence > 0.5:  # Use detection if confident
                 measurement = np.array([
-                    detected_center[0],  # Detected center X
-                    detected_center[1],  # Detected center Y
+                    detected_cx,  # Detected center X
+                    detected_cy,  # Detected center Y
                     predicted_state[2],  # Keep predicted width
                     predicted_state[3]   # Keep predicted height
                 ])
@@ -931,7 +931,7 @@ class Tracker:
             
             # Debug logging for measurement
             if current_frame_idx % 30 == 0:  # Log every 30 frames
-                logger.info(f"Frame {current_frame_idx}: {measurement_source}_center=({detected_center[0]:.1f}, {detected_center[1]:.1f}), "
+                logger.info(f"Frame {current_frame_idx}: {measurement_source}_center=({detected_cx:.1f}, {detected_cy:.1f}), "
                            f"detection_confidence={detection_confidence:.3f}, "
                            f"predicted_state=({predicted_state[0]:.1f}, {predicted_state[1]:.1f}), "
                            f"measurement=({measurement[0]:.1f}, {measurement[1]:.1f})")
