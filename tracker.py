@@ -918,7 +918,9 @@ class Tracker:
         # Save JSONL
         with open(jsonl_file, 'w') as f:
             for result in results:
-                json.dump(result.__dict__, f)
+                # Convert to serializable format
+                result_dict = self._convert_config_to_serializable(result.__dict__)
+                json.dump(result_dict, f)
                 f.write('\n')
         
         logger.info(f"Saved tracking results: {len(results)} frames to {csv_file} and {jsonl_file}")
@@ -1044,13 +1046,13 @@ class Tracker:
         """Save audit log with system information."""
         audit_data = {
             "input_hash": self._compute_file_hash(self.video_path),
-            "config_snapshot": self.config.__dict__,
+            "config_snapshot": self._convert_config_to_serializable(self.config.__dict__),
             "software_versions": self._get_software_versions(),
             "gpu_info": self._get_gpu_info(),
             "seed_details": {
                 "frame_idx": self.seed.frame_idx,
-                "box": self.seed.box,
-                "time_s": self.seed.time_s
+                "box": [float(x) for x in self.seed.box],  # Convert tuple to list of floats
+                "time_s": float(self.seed.time_s)
             } if self.seed else None,
             "processing_metadata": {
                 "timestamp": time.time(),
@@ -1061,6 +1063,19 @@ class Tracker:
         
         with open(audit_file, 'w') as f:
             json.dump(audit_data, f, indent=2)
+    
+    def _convert_config_to_serializable(self, obj):
+        """Convert config object to JSON-serializable format."""
+        if isinstance(obj, dict):
+            return {k: self._convert_config_to_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_config_to_serializable(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.floating)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj
     
     def _compute_file_hash(self, file_path: str) -> str:
         """Compute SHA-256 hash of file."""
