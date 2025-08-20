@@ -853,8 +853,8 @@ class Tracker:
         return confidence
     
     def _create_tracking_state(self, frame_idx: int, time_s: float, state: np.ndarray,
-                             zone_name: str, confidence: float, flags: List[str],
-                             flow_info: Dict[str, Any]) -> TrackingState:
+                              zone_name: str, confidence: float, flags: List[str],
+                              flow_info: Dict[str, Any]) -> TrackingState:
         """Create TrackingState record from current tracking information."""
         cx, cy, w, h, vx, vy, vw, vh = state
         
@@ -865,11 +865,16 @@ class Tracker:
         source_w = w / scale_factor
         source_h = h / scale_factor
         
-        # Calculate bounding box in source coordinates
-        x1 = source_cx - source_w / 2
-        y1 = source_cy - source_h / 2
-        x2 = source_cx + source_w / 2
-        y2 = source_cy + source_h / 2
+        # Make bounding box larger by percentage (configurable)
+        box_expansion = self.config.render.get('box_expansion_percent', 20)  # 20% larger
+        expansion_x = source_w * (box_expansion / 100.0)
+        expansion_y = source_h * (box_expansion / 100.0)
+        
+        # Calculate expanded bounding box in source coordinates
+        x1 = source_cx - (source_w / 2) - expansion_x
+        y1 = source_cy - (source_h / 2) - expansion_y
+        x2 = source_cx + (source_w / 2) + expansion_x
+        y2 = source_cy + (source_h / 2) + expansion_y
         
         return TrackingState(
             frame_idx=frame_idx,
@@ -968,8 +973,14 @@ class Tracker:
                 result = results_by_frame.get(frame_idx)
                 
                 if result:
-                    # Draw bounding box
+                    # Draw bounding box with bounds checking
                     x1, y1, x2, y2 = map(int, [result.x1, result.y1, result.x2, result.y2])
+                    
+                    # Ensure bounds are within frame
+                    x1 = max(0, min(x1, source_frame.shape[1] - 1))
+                    y1 = max(0, min(y1, source_frame.shape[0] - 1))
+                    x2 = max(0, min(x2, source_frame.shape[1] - 1))
+                    y2 = max(0, min(y2, source_frame.shape[0] - 1))
                     
                     # Box color based on confidence
                     if result.confidence > 0.7:
@@ -985,6 +996,8 @@ class Tracker:
                     
                     # Draw center point
                     center_x, center_y = int(result.cx), int(result.cy)
+                    center_x = max(0, min(center_x, source_frame.shape[1] - 1))
+                    center_y = max(0, min(center_y, source_frame.shape[0] - 1))
                     cv2.circle(source_frame, (center_x, center_y), 5, color, -1)
                     
                     # Draw velocity vector
@@ -993,37 +1006,41 @@ class Tracker:
                         end_y = center_y + int(result.vy * 2)
                         cv2.arrowedLine(source_frame, (center_x, center_y), (end_x, end_y), color, 2)
                     
-                    # Draw text overlay
+                    # Draw text overlay with better spacing
                     font = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = self.config.render.get('font_scale', 0.7)
+                    font_scale = self.config.render.get('font_scale', 0.6)
+                    thickness = 2
+                    line_height = 25
+                    start_x = 10
+                    start_y = 30
                     
                     # Frame info
-                    cv2.putText(source_frame, f"Frame: {frame_idx}", (10, 30), 
-                               font, font_scale, (255, 255, 255), 2)
+                    cv2.putText(source_frame, f"Frame: {frame_idx}", (start_x, start_y), 
+                               font, font_scale, (255, 255, 255), thickness)
                     
                     # Time info
-                    cv2.putText(source_frame, f"Time: {result.time_s:.2f}s", (10, 60), 
-                               font, font_scale, (255, 255, 255), 2)
+                    cv2.putText(source_frame, f"Time: {result.time_s:.2f}s", (start_x, start_y + line_height), 
+                               font, font_scale, (255, 255, 255), thickness)
                     
                     # Confidence and zone
-                    cv2.putText(source_frame, f"Conf: {result.confidence:.3f}", (10, 90), 
-                               font, font_scale, (255, 255, 255), 2)
-                    cv2.putText(source_frame, f"Zone: {result.zone}", (10, 120), 
-                               font, font_scale, (255, 255, 255), 2)
+                    cv2.putText(source_frame, f"Conf: {result.confidence:.3f}", (start_x, start_y + 2*line_height), 
+                               font, font_scale, (255, 255, 255), thickness)
+                    cv2.putText(source_frame, f"Zone: {result.zone}", (start_x, start_y + 3*line_height), 
+                               font, font_scale, (255, 255, 255), thickness)
                     
                     # Flags
                     if result.flags:
                         flags_text = ','.join(result.flags)
-                        cv2.putText(source_frame, f"Flags: {flags_text}", (10, 150), 
-                                   font, font_scale, (255, 255, 255), 2)
+                        cv2.putText(source_frame, f"Flags: {flags_text}", (start_x, start_y + 4*line_height), 
+                                   font, font_scale, (255, 255, 255), thickness)
                     
                     # Position info
-                    cv2.putText(source_frame, f"Pos: ({result.cx:.1f}, {result.cy:.1f})", (10, 180), 
-                               font, font_scale, (255, 255, 255), 2)
+                    cv2.putText(source_frame, f"Pos: ({result.cx:.1f}, {result.cy:.1f})", (start_x, start_y + 5*line_height), 
+                               font, font_scale, (255, 255, 255), thickness)
                     
                     # Velocity info
-                    cv2.putText(source_frame, f"Vel: ({result.vx:.1f}, {result.vy:.1f})", (10, 210), 
-                               font, font_scale, (255, 255, 255), 2)
+                    cv2.putText(source_frame, f"Vel: ({result.vx:.1f}, {result.vy:.1f})", (start_x, start_y + 6*line_height), 
+                               font, font_scale, (255, 255, 255), thickness)
                 
                 # Write frame
                 out.write(source_frame)

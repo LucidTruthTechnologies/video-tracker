@@ -106,7 +106,8 @@ detector:
 
 render:
   draw_thickness: 4
-  font_scale: 0.7
+  font_scale: 0.6
+  box_expansion_percent: 20  # Make bounding box 20% larger than tracked object
   label: "TARGET"
   show_zone: true
   show_confidence: true
