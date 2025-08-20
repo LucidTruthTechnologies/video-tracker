@@ -128,7 +128,7 @@ render:
   show_zone: true
   show_confidence: true
   # Annotation positioning: "top-left", "top-right", "bottom-left", "bottom-right"
-  annotation_corner: "top-left"
+  annotation_corner: "bottom-left"
   # Annotation background: true for dark background, false for no background
   annotation_background: true
 
