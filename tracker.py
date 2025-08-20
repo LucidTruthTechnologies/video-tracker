@@ -664,8 +664,17 @@ class Tracker:
             # Initialize tracking
             self.frame_reader.seek_frame(self.seed.frame_idx)
             
-            # TODO: Implement forward and backward tracking passes
-            logger.info("TODO: Implement tracking passes")
+            # Initialize Kalman filter with seed
+            self._initialize_tracker_with_seed()
+            
+            # Run forward tracking
+            forward_results = self._run_forward_tracking()
+            
+            # TODO: Implement backward tracking and RTS smoothing
+            logger.info("Forward tracking completed, backward tracking not yet implemented")
+            
+            # Save results
+            self._save_tracking_results(forward_results, track_csv, track_jsonl)
             
             # Save audit log
             self._save_audit_log(audit_json)
@@ -675,6 +684,229 @@ class Tracker:
         except Exception as e:
             logger.error(f"Tracking failed: {e}")
             return False
+    
+    def _initialize_tracker_with_seed(self):
+        """Initialize Kalman tracker with seed information."""
+        x1, y1, x2, y2 = self.seed.box
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        w = x2 - x1
+        h = y2 - y1
+        
+        # Set initial state: [cx, cy, w, h, vx, vy, vw, vh]
+        initial_state = np.array([cx, cy, w, h, 0.0, 0.0, 0.0, 0.0])
+        self.kalman_tracker.set_state(initial_state)
+        
+        logger.info(f"Initialized tracker with seed: center=({cx:.1f}, {cy:.1f}), size=({w:.1f}, {h:.1f})")
+    
+    def _run_forward_tracking(self) -> List[TrackingState]:
+        """Run forward tracking from seed frame to end of video."""
+        results = []
+        current_frame_idx = self.seed.frame_idx
+        fps = self.video_probe.metadata['fps']
+        
+        # Read first frame
+        ret, source_frame, work_frame = self.frame_reader.read_frame()
+        if not ret:
+            logger.error("Failed to read seed frame")
+            return results
+        
+        prev_work_frame = work_frame
+        prev_source_frame = source_frame
+        
+        logger.info(f"Starting forward tracking from frame {current_frame_idx}")
+        
+        while True:
+            # Read next frame
+            ret, source_frame, work_frame = self.frame_reader.read_frame()
+            if not ret:
+                logger.info(f"Reached end of video at frame {current_frame_idx}")
+                break
+            
+            current_frame_idx += 1
+            time_s = current_frame_idx / fps
+            
+            # Compute optical flow
+            flow = self.optical_flow.compute_flow(prev_work_frame, work_frame)
+            
+            # Get current Kalman prediction
+            predicted_state = self.kalman_tracker.predict()
+            
+            # Sample flow in predicted region
+            pred_box = self._state_to_box(predicted_state)
+            flow_info = self.optical_flow.sample_flow_in_box(flow, pred_box)
+            
+            # Create measurement from flow
+            measurement = self._create_measurement_from_flow(predicted_state, flow_info)
+            
+            # Determine active zone
+            zone_name, zone_overlap = self.zone_manager.get_active_zone(pred_box, work_res=True)
+            
+            # Apply zone-aware constraints
+            if self._validate_measurement(measurement, zone_name, predicted_state):
+                # Update Kalman filter
+                updated_state = self.kalman_tracker.update(measurement, zone_name)
+                confidence = self._calculate_confidence(flow_info, zone_name)
+                flags = ["MEAS"]
+            else:
+                # Use prediction only
+                updated_state = predicted_state
+                confidence = self._calculate_confidence(flow_info, zone_name) * 0.8  # Reduce confidence
+                flags = ["PRED"]
+            
+            # Create tracking state record
+            tracking_state = self._create_tracking_state(
+                current_frame_idx, time_s, updated_state, zone_name, 
+                confidence, flags, flow_info
+            )
+            
+            results.append(tracking_state)
+            
+            # Update previous frames
+            prev_work_frame = work_frame
+            prev_source_frame = source_frame
+            
+            # Log progress every 100 frames
+            if current_frame_idx % 100 == 0:
+                logger.info(f"Forward tracking: frame {current_frame_idx}, zone: {zone_name}, confidence: {confidence:.3f}")
+        
+        logger.info(f"Forward tracking completed: {len(results)} frames processed")
+        return results
+    
+    def _state_to_box(self, state: np.ndarray) -> Tuple[float, float, float, float]:
+        """Convert Kalman state to bounding box (x1, y1, x2, y2) in work coordinates."""
+        cx, cy, w, h = state[:4]
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+        return (x1, y1, x2, y2)
+    
+    def _create_measurement_from_flow(self, predicted_state: np.ndarray, 
+                                    flow_info: Dict[str, Any]) -> np.ndarray:
+        """Create measurement from optical flow information."""
+        cx, cy, w, h = predicted_state[:4]
+        center_shift = flow_info['center_shift']
+        
+        # Apply flow shift to center
+        new_cx = cx + center_shift[0]
+        new_cy = cy + center_shift[1]
+        
+        # Keep size unchanged for now (could be refined with rim divergence)
+        new_w = w
+        new_h = h
+        
+        return np.array([new_cx, new_cy, new_w, new_h])
+    
+    def _validate_measurement(self, measurement: np.ndarray, zone_name: str, 
+                            predicted_state: np.ndarray) -> bool:
+        """Validate measurement against zone constraints."""
+        if zone_name == "unknown":
+            return True  # Accept measurement if no zone constraints
+        
+        # Get zone parameters
+        zone_params = self.config.zone_params.get(zone_name, {})
+        
+        # Check speed constraints
+        if 'speed_px_s_max' in zone_params:
+            max_speed = zone_params['speed_px_s_max']
+            current_speed = np.linalg.norm(measurement[:2] - predicted_state[:2])
+            if current_speed > max_speed:
+                logger.debug(f"Measurement rejected: speed {current_speed:.1f} exceeds zone limit {max_speed}")
+                return False
+        
+        # Check size constraints
+        if 'scale_change_per_frame_max' in zone_params:
+            max_scale_change = zone_params['scale_change_per_frame_max']
+            scale_change_w = abs(measurement[2] - predicted_state[2]) / predicted_state[2]
+            scale_change_h = abs(measurement[3] - predicted_state[3]) / predicted_state[3]
+            if scale_change_w > max_scale_change or scale_change_h > max_scale_change:
+                logger.debug(f"Measurement rejected: scale change exceeds zone limit {max_scale_change}")
+                return False
+        
+        return True
+    
+    def _calculate_confidence(self, flow_info: Dict[str, Any], zone_name: str) -> float:
+        """Calculate confidence score based on flow coherence and zone."""
+        # Base confidence from flow agreement
+        flow_agree = flow_info.get('flow_agree', 0.0)
+        
+        # Zone-specific confidence adjustments
+        zone_params = self.config.zone_params.get(zone_name, {})
+        zone_confidence_boost = zone_params.get('confidence_boost', 1.0)
+        
+        # Calculate confidence (0.0 to 1.0)
+        confidence = flow_agree * zone_confidence_boost
+        confidence = max(0.0, min(1.0, confidence))
+        
+        return confidence
+    
+    def _create_tracking_state(self, frame_idx: int, time_s: float, state: np.ndarray,
+                             zone_name: str, confidence: float, flags: List[str],
+                             flow_info: Dict[str, Any]) -> TrackingState:
+        """Create TrackingState record from current tracking information."""
+        cx, cy, w, h, vx, vy, vw, vh = state
+        
+        # Convert work coordinates to source coordinates
+        scale_factor = getattr(self.frame_reader, 'scale_factor', 1.0)
+        source_cx = cx / scale_factor
+        source_cy = cy / scale_factor
+        source_w = w / scale_factor
+        source_h = h / scale_factor
+        
+        # Calculate bounding box in source coordinates
+        x1 = source_cx - source_w / 2
+        y1 = source_cy - source_h / 2
+        x2 = source_cx + source_w / 2
+        y2 = source_cy + source_h / 2
+        
+        return TrackingState(
+            frame_idx=frame_idx,
+            time_s=time_s,
+            cx=source_cx,
+            cy=source_cy,
+            w=source_w,
+            h=source_h,
+            vx=vx,
+            vy=vy,
+            vw=vw,
+            vh=vh,
+            confidence=confidence,
+            zone=zone_name,
+            flags=flags,
+            flow_agree=flow_info.get('flow_agree', 0.0)
+        )
+    
+    def _save_tracking_results(self, results: List[TrackingState], 
+                             csv_file: Path, jsonl_file: Path):
+        """Save tracking results to CSV and JSONL files."""
+        # Save CSV
+        with open(csv_file, 'w', newline='') as f:
+            import csv
+            writer = csv.writer(f)
+            
+            # Write header
+            writer.writerow([
+                'frame', 'time_s', 'cx', 'cy', 'w', 'h', 'x1', 'y1', 'x2', 'y2',
+                'confidence', 'flags', 'zone', 'maha_sq', 'flow_agree', 'iou_meas_pred'
+            ])
+            
+            # Write data
+            for result in results:
+                writer.writerow([
+                    result.frame_idx, result.time_s, result.cx, result.cy, 
+                    result.w, result.h, result.x1, result.y1, result.x2, result.y2,
+                    result.confidence, ','.join(result.flags), result.zone,
+                    result.maha_sq, result.flow_agree, result.iou_meas_pred
+                ])
+        
+        # Save JSONL
+        with open(jsonl_file, 'w') as f:
+            for result in results:
+                json.dump(result.__dict__, f)
+                f.write('\n')
+        
+        logger.info(f"Saved tracking results: {len(results)} frames to {csv_file} and {jsonl_file}")
     
     def _save_audit_log(self, audit_file: Path):
         """Save audit log with system information."""
