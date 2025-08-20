@@ -759,6 +759,12 @@ class Tracker:
             # Create measurement from flow
             measurement = self._create_measurement_from_flow(predicted_state, flow_info)
             
+            # Debug logging for flow measurement
+            if current_frame_idx % 30 == 0:  # Log every 30 frames
+                logger.info(f"Frame {current_frame_idx}: flow_center_shift={flow_info['center_shift']}, "
+                           f"predicted_state=({predicted_state[0]:.1f}, {predicted_state[1]:.1f}), "
+                           f"measurement=({measurement[0]:.1f}, {measurement[1]:.1f})")
+            
             # Determine active zone
             zone_name, zone_overlap = self.zone_manager.get_active_zone(pred_box, work_res=True)
             
@@ -886,12 +892,19 @@ class Tracker:
         source_w = w / scale_factor
         source_h = h / scale_factor
         
+        # Debug logging for coordinate conversion
+        if frame_idx % 30 == 0:  # Log every 30 frames to avoid spam
+            logger.info(f"Frame {frame_idx}: work_coords=({cx:.1f}, {cy:.1f}, {w:.1f}, {h:.1f}), "
+                       f"scale_factor={scale_factor:.3f}, "
+                       f"source_coords=({source_cx:.1f}, {source_cy:.1f}, {source_w:.1f}, {source_h:.1f})")
+        
         # Make bounding box larger by percentage (configurable)
         box_expansion = self.config.render.get('box_expansion_percent', 20)  # 20% larger
         expansion_x = source_w * (box_expansion / 100.0)
         expansion_y = source_h * (box_expansion / 100.0)
         
         # Calculate expanded bounding box in source coordinates
+        # source_cx and source_cy are already center coordinates
         x1 = source_cx - (source_w / 2) - expansion_x
         y1 = source_cy - (source_h / 2) - expansion_y
         x2 = source_cx + (source_w / 2) + expansion_x
