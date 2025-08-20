@@ -793,6 +793,18 @@ class Tracker:
         y2 = cy + h / 2
         return (x1, y1, x2, y2)
     
+    def _work_to_source_coords(self, work_coords: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+        """Convert work coordinates to source coordinates."""
+        x1, y1, x2, y2 = work_coords
+        scale_factor = getattr(self.frame_reader, 'scale_factor', 1.0)
+        
+        source_x1 = x1 / scale_factor
+        source_y1 = y1 / scale_factor
+        source_x2 = x2 / scale_factor
+        source_y2 = y2 / scale_factor
+        
+        return (source_x1, source_y1, source_x2, source_y2)
+    
     def _create_measurement_from_flow(self, predicted_state: np.ndarray, 
                                     flow_info: Dict[str, Any]) -> np.ndarray:
         """Create measurement from optical flow information."""
@@ -875,6 +887,12 @@ class Tracker:
         y1 = source_cy - (source_h / 2) - expansion_y
         x2 = source_cx + (source_w / 2) + expansion_x
         y2 = source_cy + (source_h / 2) + expansion_y
+        
+        # Ensure bounding box is within frame bounds
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(self.video_probe.metadata['width'], x2)
+        y2 = min(self.video_probe.metadata['height'], y2)
         
         return TrackingState(
             frame_idx=frame_idx,
@@ -1002,45 +1020,78 @@ class Tracker:
                     
                     # Draw velocity vector
                     if abs(result.vx) > 0.1 or abs(result.vy) > 0.1:
-                        end_x = center_x + int(result.vx * 2)  # Scale for visibility
-                        end_y = center_y + int(result.vy * 2)
+                        # Scale velocity for visibility (convert from work to source coordinates)
+                        scale_factor = getattr(self.frame_reader, 'scale_factor', 1.0)
+                        vel_scale = 10.0  # Make velocity arrows more visible
+                        end_x = center_x + int(result.vx * vel_scale / scale_factor)
+                        end_y = center_y + int(result.vy * vel_scale / scale_factor)
                         cv2.arrowedLine(source_frame, (center_x, center_y), (end_x, end_y), color, 2)
                     
-                    # Draw text overlay with better spacing
+                    # Draw text overlay with configurable positioning and background
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     font_scale = self.config.render.get('font_scale', 0.6)
                     thickness = 2
                     line_height = 25
-                    start_x = 10
-                    start_y = 30
+                    padding = 10
                     
-                    # Frame info
-                    cv2.putText(source_frame, f"Frame: {frame_idx}", (start_x, start_y), 
-                               font, font_scale, (255, 255, 255), thickness)
+                    # Get annotation corner configuration
+                    corner = self.config.render.get('annotation_corner', 'top-left')
+                    show_background = self.config.render.get('annotation_background', True)
                     
-                    # Time info
-                    cv2.putText(source_frame, f"Time: {result.time_s:.2f}s", (start_x, start_y + line_height), 
-                               font, font_scale, (255, 255, 255), thickness)
+                    # Calculate text position based on corner
+                    if corner == 'top-left':
+                        start_x = padding
+                        start_y = padding + line_height
+                    elif corner == 'top-right':
+                        start_x = source_frame.shape[1] - 200  # Approximate text width
+                        start_y = padding + line_height
+                    elif corner == 'bottom-left':
+                        start_x = padding
+                        start_y = source_frame.shape[0] - padding - 6*line_height
+                    elif corner == 'bottom-right':
+                        start_x = source_frame.shape[1] - 200
+                        start_y = source_frame.shape[0] - padding - 6*line_height
+                    else:
+                        # Default to top-left
+                        start_x = padding
+                        start_y = padding + line_height
                     
-                    # Confidence and zone
-                    cv2.putText(source_frame, f"Conf: {result.confidence:.3f}", (start_x, start_y + 2*line_height), 
-                               font, font_scale, (255, 255, 255), thickness)
-                    cv2.putText(source_frame, f"Zone: {result.zone}", (start_x, start_y + 3*line_height), 
-                               font, font_scale, (255, 255, 255), thickness)
+                    # Prepare text lines
+                    text_lines = [
+                        f"Frame: {frame_idx}",
+                        f"Time: {result.time_s:.2f}s",
+                        f"Conf: {result.confidence:.3f}",
+                        f"Zone: {result.zone}",
+                        f"Flags: {','.join(result.flags) if result.flags else 'None'}",
+                        f"Pos: ({result.cx:.1f}, {result.cy:.1f})",
+                        f"Vel: ({result.vx:.1f}, {result.vy:.1f})"
+                    ]
                     
-                    # Flags
-                    if result.flags:
-                        flags_text = ','.join(result.flags)
-                        cv2.putText(source_frame, f"Flags: {flags_text}", (start_x, start_y + 4*line_height), 
+                    # Draw background rectangle if enabled
+                    if show_background:
+                        bg_width = 220  # Approximate width for all text
+                        bg_height = len(text_lines) * line_height + padding
+                        bg_x1 = start_x - padding
+                        bg_y1 = start_y - line_height
+                        bg_x2 = bg_x1 + bg_width
+                        bg_y2 = bg_y1 + bg_height
+                        
+                        # Ensure background is within frame bounds
+                        bg_x1 = max(0, bg_x1)
+                        bg_y1 = max(0, bg_y1)
+                        bg_x2 = min(source_frame.shape[1], bg_x2)
+                        bg_y2 = min(source_frame.shape[0], bg_y2)
+                        
+                        # Draw semi-transparent dark background
+                        overlay = source_frame.copy()
+                        cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+                        cv2.addWeighted(overlay, 0.7, source_frame, 0.3, 0, source_frame)
+                    
+                    # Draw text lines
+                    for i, text in enumerate(text_lines):
+                        y_pos = start_y + i * line_height
+                        cv2.putText(source_frame, text, (start_x, y_pos), 
                                    font, font_scale, (255, 255, 255), thickness)
-                    
-                    # Position info
-                    cv2.putText(source_frame, f"Pos: ({result.cx:.1f}, {result.cy:.1f})", (start_x, start_y + 5*line_height), 
-                               font, font_scale, (255, 255, 255), thickness)
-                    
-                    # Velocity info
-                    cv2.putText(source_frame, f"Vel: ({result.vx:.1f}, {result.vy:.1f})", (start_x, start_y + 6*line_height), 
-                               font, font_scale, (255, 255, 255), thickness)
                 
                 # Write frame
                 out.write(source_frame)
