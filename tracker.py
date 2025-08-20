@@ -476,11 +476,11 @@ class OpticalFlow:
         gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
         
-        # Compute flow
+        # Compute flow with more sensitive parameters for simple motion
         flow = cv2.calcOpticalFlowFarneback(
             gray1, gray2, None, 
-            pyr_scale=0.5, levels=3, winsize=15, 
-            iterations=3, poly_n=5, poly_sigma=1.2, 
+            pyr_scale=0.3, levels=5, winsize=25,  # More sensitive parameters
+            iterations=5, poly_n=7, poly_sigma=1.5, 
             flags=0
         )
         
@@ -522,6 +522,19 @@ class OpticalFlow:
         mean_angle = np.mean(flow_angles)
         angle_diff = np.abs(flow_angles - mean_angle)
         agreement_ratio = np.sum(angle_diff < np.pi/4) / angle_diff.size
+        
+        # Debug: log flow statistics for first few frames
+        if hasattr(self, '_debug_frame_count'):
+            self._debug_frame_count += 1
+        else:
+            self._debug_frame_count = 0
+            
+        if self._debug_frame_count < 5:  # Log first 5 frames
+            logger.info(f"Flow debug frame {self._debug_frame_count}: box=({x1},{y1},{x2},{y2}), "
+                       f"dilated=({x1_d},{y1_d},{x2_d},{y2_d}), "
+                       f"flow_region_shape={flow_region.shape}, "
+                       f"center_shift={center_shift}, "
+                       f"flow_magnitudes_range=({np.min(flow_magnitudes):.3f}, {np.max(flow_magnitudes):.3f})")
         
         return {
             'center_shift': center_shift,
