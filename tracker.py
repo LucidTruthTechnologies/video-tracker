@@ -680,6 +680,13 @@ class Tracker:
             # Save results
             self._save_tracking_results(forward_results, track_csv, track_jsonl)
             
+            # Render annotated video
+            annotated_video_path = run_dir / "annotated_video.mp4"
+            if self._render_annotated_video(forward_results, annotated_video_path):
+                logger.info(f"Annotated video saved: {annotated_video_path}")
+            else:
+                logger.warning("Failed to render annotated video")
+            
             # Save audit log
             self._save_audit_log(audit_json)
             
@@ -915,6 +922,113 @@ class Tracker:
                 f.write('\n')
         
         logger.info(f"Saved tracking results: {len(results)} frames to {csv_file} and {jsonl_file}")
+    
+    def _render_annotated_video(self, results: List[TrackingState], 
+                               output_video_path: Path) -> bool:
+        """Render annotated video with tracking boxes and metadata."""
+        try:
+            # Get video properties
+            fps = self.video_probe.metadata['fps']
+            width = self.video_probe.metadata['width']
+            height = self.video_probe.metadata['height']
+            
+            # Create video writer
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(str(output_video_path), fourcc, fps, (width, height))
+            
+            if not out.isOpened():
+                logger.error("Failed to create video writer")
+                return False
+            
+            # Create results lookup by frame
+            results_by_frame = {r.frame_idx: r for r in results}
+            
+            # Seek to start
+            self.frame_reader.seek_frame(0)
+            
+            frame_idx = 0
+            while True:
+                # Read frame
+                ret, source_frame, _ = self.frame_reader.read_frame()
+                if not ret:
+                    break
+                
+                # Get tracking result for this frame
+                result = results_by_frame.get(frame_idx)
+                
+                if result:
+                    # Draw bounding box
+                    x1, y1, x2, y2 = map(int, [result.x1, result.y1, result.x2, result.y2])
+                    
+                    # Box color based on confidence
+                    if result.confidence > 0.7:
+                        color = (0, 255, 0)  # Green for high confidence
+                    elif result.confidence > 0.4:
+                        color = (0, 255, 255)  # Yellow for medium confidence
+                    else:
+                        color = (0, 0, 255)  # Red for low confidence
+                    
+                    # Draw rectangle
+                    thickness = self.config.render.get('draw_thickness', 4)
+                    cv2.rectangle(source_frame, (x1, y1), (x2, y2), color, thickness)
+                    
+                    # Draw center point
+                    center_x, center_y = int(result.cx), int(result.cy)
+                    cv2.circle(source_frame, (center_x, center_y), 5, color, -1)
+                    
+                    # Draw velocity vector
+                    if abs(result.vx) > 0.1 or abs(result.vy) > 0.1:
+                        end_x = center_x + int(result.vx * 2)  # Scale for visibility
+                        end_y = center_y + int(result.vy * 2)
+                        cv2.arrowedLine(source_frame, (center_x, center_y), (end_x, end_y), color, 2)
+                    
+                    # Draw text overlay
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = self.config.render.get('font_scale', 0.7)
+                    
+                    # Frame info
+                    cv2.putText(source_frame, f"Frame: {frame_idx}", (10, 30), 
+                               font, font_scale, (255, 255, 255), 2)
+                    
+                    # Time info
+                    cv2.putText(source_frame, f"Time: {result.time_s:.2f}s", (10, 60), 
+                               font, font_scale, (255, 255, 255), 2)
+                    
+                    # Confidence and zone
+                    cv2.putText(source_frame, f"Conf: {result.confidence:.3f}", (10, 90), 
+                               font, font_scale, (255, 255, 255), 2)
+                    cv2.putText(source_frame, f"Zone: {result.zone}", (10, 120), 
+                               font, font_scale, (255, 255, 255), 2)
+                    
+                    # Flags
+                    if result.flags:
+                        flags_text = ','.join(result.flags)
+                        cv2.putText(source_frame, f"Flags: {flags_text}", (10, 150), 
+                                   font, font_scale, (255, 255, 255), 2)
+                    
+                    # Position info
+                    cv2.putText(source_frame, f"Pos: ({result.cx:.1f}, {result.cy:.1f})", (10, 180), 
+                               font, font_scale, (255, 255, 255), 2)
+                    
+                    # Velocity info
+                    cv2.putText(source_frame, f"Vel: ({result.vx:.1f}, {result.vy:.1f})", (10, 210), 
+                               font, font_scale, (255, 255, 255), 2)
+                
+                # Write frame
+                out.write(source_frame)
+                frame_idx += 1
+                
+                # Log progress
+                if frame_idx % 30 == 0:
+                    logger.info(f"Rendering frame {frame_idx}")
+            
+            out.release()
+            logger.info(f"Annotated video saved to: {output_video_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Video rendering failed: {e}")
+            return False
     
     def _save_audit_log(self, audit_file: Path):
         """Save audit log with system information."""
