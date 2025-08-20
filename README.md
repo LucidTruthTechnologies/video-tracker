@@ -13,21 +13,51 @@ A high-performance video tracking system designed for surveillance applications,
 
 ## Installation
 
-1. Clone the repository:
+### System Dependencies
+
+**FFmpeg is required** for video processing and metadata extraction:
+
 ```bash
-git clone <repository-url>
-cd video-tracker
+# Ubuntu/Debian
+sudo apt update && sudo apt install ffmpeg -y
+
+# macOS (using Homebrew)
+brew install ffmpeg
+
+# Windows
+# Download from https://ffmpeg.org/download.html
+# Or use: winget install ffmpeg
 ```
 
-2. Install dependencies:
+**Verify FFmpeg installation:**
 ```bash
-pip install -r requirements.txt
+ffprobe -version
 ```
 
-3. Ensure FFmpeg is installed on your system:
-   - **Windows**: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-   - **macOS**: `brew install ffmpeg`
-   - **Linux**: `sudo apt install ffmpeg` or equivalent
+### Python Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone <repository-url>
+   cd video-tracker
+   ```
+
+2. **Create virtual environment:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. **Install Python dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Verify complete installation:**
+   ```bash
+   ffprobe -version  # Should show FFmpeg version
+   python -c "import cv2, numpy, yaml; print('All dependencies installed!')"
+   ```
 
 ## Quick Start
 
@@ -157,10 +187,28 @@ frame,time_s,cx,cy,w,h,x1,y1,x2,y2,confidence,flags,zone,maha_sq,flow_agree,iou_
 
 ### Common Issues
 
-1. **FFmpeg not found**: Ensure FFmpeg is installed and in your PATH
-2. **OpenCV errors**: Check OpenCV installation and video codec support
-3. **Memory issues**: Reduce chunk size or work resolution
-4. **Zone validation errors**: Check zone polygon coordinates and dimensions
+**"No such file or directory: 'ffprobe'"**
+- Install FFmpeg: `sudo apt install ffmpeg` (Ubuntu/Debian)
+- Verify with: `ffprobe -version`
+
+**"ModuleNotFoundError: No module named 'cv2'"**
+- Activate virtual environment: `source venv/bin/activate`
+- Install requirements: `pip install -r requirements.txt`
+
+**Video file not found or invalid**
+- Check file path and permissions
+- Ensure video format is supported (MP4, AVI, MKV, MOV)
+- Verify video file integrity
+
+**Zone file errors**
+- Validate JSON syntax: `python -m json.tool test_zones.json`
+- Check zone dimensions match video dimensions
+- Ensure all polygons have ≥3 vertices
+
+**Memory issues during processing**
+- Reduce work resolution in config.yaml
+- Process shorter video segments
+- Check available system memory
 
 ### Debug Mode
 
