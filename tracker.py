@@ -697,18 +697,27 @@ class Tracker:
             return False
     
     def _initialize_tracker_with_seed(self):
-        """Initialize Kalman tracker with seed information."""
+        """Initialize Kalman tracker with seed information in work coordinates."""
         x1, y1, x2, y2 = self.seed.box
-        cx = (x1 + x2) / 2
-        cy = (y1 + y2) / 2
-        w = x2 - x1
-        h = y2 - y1
         
-        # Set initial state: [cx, cy, w, h, vx, vy, vw, vh]
-        initial_state = np.array([cx, cy, w, h, 0.0, 0.0, 0.0, 0.0])
+        # Convert seed from source coordinates to work coordinates
+        scale_factor = getattr(self.frame_reader, 'scale_factor', 1.0)
+        work_x1 = x1 * scale_factor
+        work_y1 = y1 * scale_factor
+        work_x2 = x2 * scale_factor
+        work_y2 = y2 * scale_factor
+        
+        # Calculate center and size in work coordinates
+        work_cx = (work_x1 + work_x2) / 2
+        work_cy = (work_y1 + work_y2) / 2
+        work_w = work_x2 - work_x1
+        work_h = work_y2 - work_y1
+        
+        # Set initial state: [cx, cy, w, h, vx, vy, vw, vh] in work coordinates
+        initial_state = np.array([work_cx, work_cy, work_w, work_h, 0.0, 0.0, 0.0, 0.0])
         self.kalman_tracker.set_state(initial_state)
         
-        logger.info(f"Initialized tracker with seed: center=({cx:.1f}, {cy:.1f}), size=({w:.1f}, {h:.1f})")
+        logger.info(f"Initialized tracker with seed: source center=({x1:.1f}, {y1:.1f}), work center=({work_cx:.1f}, {work_cy:.1f})")
     
     def _run_forward_tracking(self) -> List[TrackingState]:
         """Run forward tracking from seed frame to end of video."""
@@ -894,6 +903,12 @@ class Tracker:
         x2 = min(self.video_probe.metadata['width'], x2)
         y2 = min(self.video_probe.metadata['height'], y2)
         
+        # Convert velocities to source coordinates as well
+        source_vx = vx / scale_factor
+        source_vy = vy / scale_factor
+        source_vw = vw / scale_factor
+        source_vh = vh / scale_factor
+        
         return TrackingState(
             frame_idx=frame_idx,
             time_s=time_s,
@@ -901,10 +916,10 @@ class Tracker:
             cy=source_cy,
             w=source_w,
             h=source_h,
-            vx=vx,
-            vy=vy,
-            vw=vw,
-            vh=vh,
+            vx=source_vx,
+            vy=source_vy,
+            vw=source_vw,
+            vh=source_vh,
             confidence=confidence,
             zone=zone_name,
             flags=flags,
@@ -1020,11 +1035,10 @@ class Tracker:
                     
                     # Draw velocity vector
                     if abs(result.vx) > 0.1 or abs(result.vy) > 0.1:
-                        # Scale velocity for visibility (convert from work to source coordinates)
-                        scale_factor = getattr(self.frame_reader, 'scale_factor', 1.0)
+                        # Velocity is already in source coordinates, just scale for visibility
                         vel_scale = 10.0  # Make velocity arrows more visible
-                        end_x = center_x + int(result.vx * vel_scale / scale_factor)
-                        end_y = center_y + int(result.vy * vel_scale / scale_factor)
+                        end_x = center_x + int(result.vx * vel_scale)
+                        end_y = center_y + int(result.vy * vel_scale)
                         cv2.arrowedLine(source_frame, (center_x, center_y), (end_x, end_y), color, 2)
                     
                     # Draw text overlay with configurable positioning and background
