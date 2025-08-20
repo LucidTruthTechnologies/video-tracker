@@ -99,7 +99,7 @@ class TestBasicFunctionality(unittest.TestCase):
                 },
                 {
                     "name": "deck", 
-                    "polygons": [[(1920, 0), (3840, 0), (3840, 1080), (1920, 1080)]]
+                    "polygons": [[(1920, 0), (3839, 0), (3839, 1080), (1920, 1080)]]
                 }
             ]
         }
