@@ -778,6 +778,12 @@ class Tracker:
                            f"predicted_state=({predicted_state[0]:.1f}, {predicted_state[1]:.1f}), "
                            f"measurement=({measurement[0]:.1f}, {measurement[1]:.1f})")
             
+            # Debug logging for measurement validation
+            if current_frame_idx % 30 == 0:  # Log every 30 frames
+                measurement_valid = self._validate_measurement(measurement, zone_name, predicted_state)
+                logger.info(f"Frame {current_frame_idx}: measurement_valid={measurement_valid}, "
+                           f"zone_name={zone_name}, flags={flags if 'flags' in locals() else 'N/A'}")
+            
             # Determine active zone
             zone_name, zone_overlap = self.zone_manager.get_active_zone(pred_box, work_res=True)
             
@@ -917,7 +923,7 @@ class Tracker:
         expansion_y = source_h * (box_expansion / 100.0)
         
         # Calculate expanded bounding box in source coordinates
-        # source_cx and source_cy are already center coordinates
+        # Simply use the tracked object's position as the center
         x1 = source_cx - (source_w / 2) - expansion_x
         y1 = source_cy - (source_h / 2) - expansion_y
         x2 = source_cx + (source_w / 2) + expansion_x
