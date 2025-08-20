@@ -927,10 +927,14 @@ class Tracker:
                                output_video_path: Path) -> bool:
         """Render annotated video with tracking boxes and metadata."""
         try:
+            logger.info(f"Starting video rendering to: {output_video_path}")
+            
             # Get video properties
             fps = self.video_probe.metadata['fps']
             width = self.video_probe.metadata['width']
             height = self.video_probe.metadata['height']
+            
+            logger.info(f"Video properties: {width}x{height} @ {fps}fps")
             
             # Create video writer
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -940,17 +944,22 @@ class Tracker:
                 logger.error("Failed to create video writer")
                 return False
             
+            logger.info("Video writer created successfully")
+            
             # Create results lookup by frame
             results_by_frame = {r.frame_idx: r for r in results}
+            logger.info(f"Processing {len(results)} tracking results for {len(results_by_frame)} frames")
             
             # Seek to start
             self.frame_reader.seek_frame(0)
+            logger.info("Seeked to frame 0")
             
             frame_idx = 0
             while True:
                 # Read frame
                 ret, source_frame, _ = self.frame_reader.read_frame()
                 if not ret:
+                    logger.info(f"End of video reached at frame {frame_idx}")
                     break
                 
                 # Get tracking result for this frame
@@ -1024,6 +1033,7 @@ class Tracker:
             
             out.release()
             logger.info(f"Annotated video saved to: {output_video_path}")
+            logger.info(f"Successfully rendered {frame_idx} frames")
             return True
             
         except Exception as e:
