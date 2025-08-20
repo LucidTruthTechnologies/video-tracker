@@ -92,8 +92,8 @@
 - [ ] [1pt] Ensure CSV/JSONL store **source-space floats**; round only when drawing.
 
 ### Renderer and Mux (4K)
-- [ ] [1pt] Draw labeled rectangle at 4K with zone and confidence; configurable thickness/font.
-- [ ] [1pt] Write annotated video preserving original FPS/timebase; mux original audio; NVENC when available.
+- [x] [1pt] Draw labeled rectangle at 4K with zone and confidence; configurable thickness/font.
+- [x] [1pt] Write annotated video preserving original FPS/timebase; mux original audio; NVENC when available.
 - [ ] [1pt] Export low-bitrate review MP4 (CRF 20–23).
 
 ### Outputs and Schemas
@@ -124,10 +124,10 @@
 ## Progress Summary
 
 - **Total Tasks**: 47
-- **Completed**: 29
+- **Completed**: 31
 - **In Progress**: 2
-- **Pending**: 16
-- **Progress**: 62%
+- **Pending**: 14
+- **Progress**: 66%
 
 ## Next Priority Tasks
 
@@ -136,6 +136,7 @@
 3. Implement RTS smoothing and fusion
 4. ✅ Implement zone-aware gating and measurement updates
 5. ✅ Add output generation (CSV, JSONL, annotated video)
+6. ✅ Fix video rendering and annotation positioning
 
 ## Notes
 
