@@ -7,7 +7,7 @@ io:
   decode_threads: 4
 
 # Zones are loaded from an external JSON created by the zone editor.
-zones_file: "zones.json"     # leave empty to treat entire frame as a single zone "global"
+zones_file: "test_zones.json"     # leave empty to treat entire frame as a single zone "global"
 
 # Per-zone motion/occlusion parameters (defaults; can be overridden per zone name)
 zone_params:
@@ -42,6 +42,24 @@ zone_params:
     speed_px_s_max: 1400
     accel_px_s2_max: 6000
     scale_change_per_frame_max: 0.07
+    missing_frames_max: 180
+    process_noise_scale: 1.0
+    flow:
+      min_agreement_ratio: 0.65
+      max_angle_deg: 40
+  left_zone:
+    speed_px_s_max: 1000
+    accel_px_s2_max: 3000
+    scale_change_per_frame_max: 0.05
+    missing_frames_max: 180
+    process_noise_scale: 1.0
+    flow:
+      min_agreement_ratio: 0.65
+      max_angle_deg: 40
+  right_zone:
+    speed_px_s_max: 1000
+    accel_px_s2_max: 3000
+    scale_change_per_frame_max: 0.05
     missing_frames_max: 180
     process_noise_scale: 1.0
     flow:
