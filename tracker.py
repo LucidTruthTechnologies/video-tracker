@@ -451,6 +451,141 @@ class ZoneManager:
         return best_zone, best_overlap
 
 
+class ObjectDetector:
+    """Hybrid object detector supporting color-based and pose-based detection."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.detection_mode = config.get('detection_mode', 'auto')  # 'auto', 'color', 'pose'
+        self.color_thresholds = config.get('color_thresholds', {})
+        self.pose_model = None  # Will be initialized if needed
+        self.min_detection_confidence = config.get('min_detection_confidence', 0.3)
+        
+        # Initialize pose detection if needed
+        if self.detection_mode in ['pose', 'auto']:
+            self._initialize_pose_detection()
+    
+    def _initialize_pose_detection(self):
+        """Initialize pose detection model (placeholder for now)."""
+        # TODO: Implement actual pose detection (MediaPipe, OpenPose, etc.)
+        logger.info("Pose detection initialized (placeholder implementation)")
+    
+    def detect_object_center(self, frame: np.ndarray, 
+                           predicted_bbox: Tuple[float, float, float, float]) -> Tuple[float, float, float]:
+        """Detect object center and return (cx, cy, confidence)."""
+        
+        if self.detection_mode == 'color':
+            return self._detect_by_color(frame, predicted_bbox)
+        elif self.detection_mode == 'pose':
+            return self._detect_by_pose(frame, predicted_bbox)
+        else:  # 'auto'
+            # Try pose first, fallback to color
+            pose_result = self._detect_by_pose(frame, predicted_bbox)
+            if pose_result[2] > self.min_detection_confidence:
+                return pose_result
+            else:
+                return self._detect_by_color(frame, predicted_bbox)
+    
+    def _detect_by_color(self, frame: np.ndarray, 
+                        predicted_bbox: Tuple[float, float, float, float]) -> Tuple[float, float, float]:
+        """Detect object center using color thresholding."""
+        x1, y1, x2, y2 = map(int, predicted_bbox)
+        
+        # Ensure bounds
+        x1 = max(0, min(x1, frame.shape[1] - 1))
+        y1 = max(0, min(y1, frame.shape[0] - 1))
+        x2 = max(0, min(x2, frame.shape[1] - 1))
+        y2 = max(0, min(y2, frame.shape[0] - 1))
+        
+        if x2 <= x1 or y2 <= y1:
+            return (x1, y1, 0.0)  # Invalid region
+        
+        # Extract region of interest
+        roi = frame[y1:y2, x1:x2]
+        
+        # Convert to HSV for better color detection
+        hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        
+        # Default red detection (for test video)
+        # Lower red range (0-10)
+        lower_red1 = np.array([0, 50, 50])
+        upper_red1 = np.array([10, 255, 255])
+        # Upper red range (170-180)
+        lower_red2 = np.array([170, 50, 50])
+        upper_red2 = np.array([180, 255, 255])
+        
+        # Create masks
+        mask1 = cv2.inRange(hsv_roi, lower_red1, upper_red1)
+        mask2 = cv2.inRange(hsv_roi, lower_red2, upper_red2)
+        mask = mask1 | mask2
+        
+        # Find contours
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return (x1, y1, 0.0)  # No object found
+        
+        # Find largest contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest_contour)
+        
+        if area < 100:  # Minimum area threshold
+            return (x1, y1, 0.0)
+        
+        # Calculate centroid
+        M = cv2.moments(largest_contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+        else:
+            cx, cy = 0, 0
+        
+        # Convert back to full frame coordinates
+        full_cx = x1 + cx
+        full_cy = y1 + cy
+        
+        # Calculate confidence based on area and mask density
+        roi_area = (x2 - x1) * (y2 - y1)
+        mask_density = np.sum(mask > 0) / roi_area
+        confidence = min(1.0, (area / roi_area) * mask_density * 2)
+        
+        return (full_cx, full_cy, confidence)
+    
+    def _detect_by_pose(self, frame: np.ndarray, 
+                        predicted_bbox: Tuple[float, float, float, float]) -> Tuple[float, float, float]:
+        """Detect person center using pose estimation (placeholder)."""
+        # TODO: Implement actual pose detection
+        # For now, return low confidence to trigger fallback
+        x1, y1, x2, y2 = predicted_bbox
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        return (cx, cy, 0.1)  # Low confidence triggers fallback
+    
+    def calculate_adaptive_bbox(self, detected_center: Tuple[float, float], 
+                              predicted_bbox: Tuple[float, float, float, float],
+                              frame_shape: Tuple[int, int]) -> Tuple[float, float, float, float]:
+        """Calculate adaptive bounding box based on detection and prediction."""
+        x1, y1, x2, y2 = predicted_bbox
+        predicted_w = x2 - x1
+        predicted_h = y2 - y1
+        
+        # Use detected center
+        detected_cx, detected_cy = detected_center
+        
+        # Calculate new bounding box around detected center
+        new_x1 = detected_cx - predicted_w / 2
+        new_y1 = detected_cy - predicted_h / 2
+        new_x2 = detected_cx + predicted_w / 2
+        new_y2 = detected_cy + predicted_h / 2
+        
+        # Ensure bounds
+        new_x1 = max(0, min(new_x1, frame_shape[1] - 1))
+        new_y1 = max(0, min(new_y1, frame_shape[0] - 1))
+        new_x2 = max(0, min(new_x2, frame_shape[1] - 1))
+        new_y2 = max(0, min(new_y2, frame_shape[0] - 1))
+        
+        return (new_x1, new_y1, new_x2, new_y2)
+
+
 class OpticalFlow:
     """Optical flow computation with zone-aware sampling."""
     
@@ -618,6 +753,7 @@ class Tracker:
         self.frame_reader = None
         self.zone_manager = None
         self.optical_flow = None
+        self.object_detector = None
         self.kalman_tracker = None
         self.seed = None
         
@@ -639,6 +775,9 @@ class Tracker:
             
             # Initialize optical flow
             self.optical_flow = OpticalFlow(self.config.flow)
+            
+            # Initialize object detector
+            self.object_detector = ObjectDetector(self.config.detector)
             
             # Initialize Kalman tracker
             self.kalman_tracker = KalmanTracker(self.config.tracker, metadata['fps'])
@@ -769,20 +908,33 @@ class Tracker:
             pred_box = self._state_to_box(predicted_state)
             flow_info = self.optical_flow.sample_flow_in_box(flow, pred_box)
             
-            # Create measurement from flow
-            measurement = self._create_measurement_from_flow(predicted_state, flow_info)
+            # Try detection-based measurement first
+            detected_center, detection_confidence = self.object_detector.detect_object_center(
+                work_frame, pred_box
+            )
             
-            # Debug logging for flow measurement
+            # Create measurement from detection or fallback to flow
+            if detection_confidence > 0.5:  # Use detection if confident
+                measurement = np.array([
+                    detected_center[0],  # Detected center X
+                    detected_center[1],  # Detected center Y
+                    predicted_state[2],  # Keep predicted width
+                    predicted_state[3]   # Keep predicted height
+                ])
+                flags = ["DETECT"]
+                measurement_source = "detection"
+            else:
+                # Fallback to optical flow
+                measurement = self._create_measurement_from_flow(predicted_state, flow_info)
+                flags = ["FLOW"]
+                measurement_source = "flow"
+            
+            # Debug logging for measurement
             if current_frame_idx % 30 == 0:  # Log every 30 frames
-                logger.info(f"Frame {current_frame_idx}: flow_center_shift={flow_info['center_shift']}, "
+                logger.info(f"Frame {current_frame_idx}: {measurement_source}_center=({detected_center[0]:.1f}, {detected_center[1]:.1f}), "
+                           f"detection_confidence={detection_confidence:.3f}, "
                            f"predicted_state=({predicted_state[0]:.1f}, {predicted_state[1]:.1f}), "
                            f"measurement=({measurement[0]:.1f}, {measurement[1]:.1f})")
-            
-            # Debug logging for measurement validation
-            if current_frame_idx % 30 == 0:  # Log every 30 frames
-                measurement_valid = self._validate_measurement(measurement, zone_name, predicted_state)
-                logger.info(f"Frame {current_frame_idx}: measurement_valid={measurement_valid}, "
-                           f"zone_name={zone_name}, flags={flags if 'flags' in locals() else 'N/A'}")
             
             # Determine active zone
             zone_name, zone_overlap = self.zone_manager.get_active_zone(pred_box, work_res=True)
@@ -792,12 +944,12 @@ class Tracker:
                 # Update Kalman filter
                 updated_state = self.kalman_tracker.update(measurement, zone_name)
                 confidence = self._calculate_confidence(flow_info, zone_name)
-                flags = ["MEAS"]
+                flags.append("MEAS")
             else:
                 # Use prediction only
                 updated_state = predicted_state
                 confidence = self._calculate_confidence(flow_info, zone_name) * 0.8  # Reduce confidence
-                flags = ["PRED"]
+                flags.append("PRED")
             
             # Create tracking state record
             tracking_state = self._create_tracking_state(

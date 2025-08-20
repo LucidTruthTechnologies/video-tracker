@@ -98,6 +98,22 @@ tracker:
     pred_decay_gamma: 0.95
 
 detector:
+  # Hybrid object detector (color + pose)
+  detection_mode: "auto"  # "auto", "color", "pose"
+  min_detection_confidence: 0.5
+  color_thresholds:
+    # Red detection for test video
+    red:
+      lower1: [0, 50, 50]      # HSV lower bound 1
+      upper1: [10, 255, 255]   # HSV upper bound 1
+      lower2: [170, 50, 50]    # HSV lower bound 2 (for red wrap-around)
+      upper2: [180, 255, 255]  # HSV upper bound 2
+  pose:
+    # Placeholder for future pose detection
+    model_path: null
+    confidence_threshold: 0.5
+    max_detections: 1
+  # Legacy parameters (kept for compatibility)
   enable: false
   iou_min: 0.2
   maha_max_sq: 9.0
